@@ -1,0 +1,98 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - Backend/*
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # --- FILL THESE IN for your Azure environment ---
+  dockerRegistryServiceConnection: '<azure-container-registry-service-connection-name>'
+  containerRegistry: 'cdcplatformacr.azurecr.io'
+  azureSubscription: '<azure-service-connection-name>'
+  webAppName: '<your-app-service-name>'
+  # --------------------------------------------------
+  imageRepository: 'cdc-platform-backend'
+  dockerfilePath: '$(Build.SourcesDirectory)/Backend/Dockerfile'
+  buildContext: '$(Build.SourcesDirectory)/Backend'
+  tag: '$(Build.BuildId)'
+
+stages:
+  - stage: Build
+    displayName: Build and push image
+    jobs:
+      - job: BuildAndPush
+        displayName: Build and push Docker image
+        steps:
+          - task: Docker@2
+            displayName: Build and push
+            inputs:
+              command: buildAndPush
+              repository: $(imageRepository)
+              dockerfile: $(dockerfilePath)
+              buildContext: $(buildContext)
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: |
+                $(tag)
+                latest
+
+  # Applying Prisma migrations against a live database is a one-way, hard-to-undo
+  # action — especially sensitive for a banking integration. This stage is wired
+  # up but requires manual approval (configure an Environment named
+  # "production-db-migration" with an approval check in Azure DevOps) so a
+  # human confirms before schema changes hit the real database.
+  - stage: Migrate
+    displayName: Apply database migrations (manual approval required)
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: ApplyMigrations
+        displayName: prisma migrate deploy
+        environment: 'production-db-migration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: NodeTool@0
+                  inputs:
+                    versionSpec: '20.x'
+                - script: |
+                    corepack enable
+                    pnpm install --frozen-lockfile
+                  workingDirectory: Backend
+                  displayName: Install dependencies
+                - script: pnpm exec prisma migrate deploy
+                  workingDirectory: Backend
+                  displayName: Run prisma migrate deploy
+                  env:
+                    DATABASE_URL: $(DATABASE_URL)
+
+  - stage: Deploy
+    displayName: Deploy to Azure App Service
+    dependsOn: Migrate
+    condition: succeeded()
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy container to App Service
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: Deploy container
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    appName: $(webAppName)
+                    containers: '$(containerRegistry)/$(imageRepository):$(tag)'

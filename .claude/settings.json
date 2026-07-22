@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command 'Get-CimInstance Win32_Process -Filter \"Name='\\\\''node.exe'\\\\''\" | Where-Object { $_.CommandLine -like '\\\\''*server.js*'\\\\'' -or $_.CommandLine -like '\\\\''*server.ts*'\\\\'' } | Select-Object ProcessId,CommandLine')",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"CommandLine LIKE '%azurite%'\\\\\" | Select-Object ProcessId,CommandLine\")",
+      "Bash(printf 'FAKE_VIDEO_BYTES_FOR_TEST_UPLOAD_1234567890')",
+      "Bash(curl -s -X POST http://localhost:4000/api/upload/video -F \"video=@/tmp/test-video.mp4;type=video/mp4\" -w \"\\\\nHTTP %{http_code}\\\\n\")",
+      "Bash(rm -f /tmp/backend_prod_crash_test2.log)",
+      "Bash(node dist/server.js)",
+      "Bash(./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
+      "Bash(curl -s -X POST http://localhost:4000/api/auth/login -H \"Content-Type: application/json\" -d '{\"email\":\"admin@cdc.ge\",\"password\":\"ZO0oPT0Ut1YI\"}')",
+      "Bash(curl -s -o /dev/null -w \"existing server status: %{http_code}\\\\n\" http://localhost:4000/api/blog)",
+      "Bash(node -e ' *)",
+      "Bash(rm -f \"node_modules/.pnpm/@prisma+client@6.19.3_prisma@6.19.3_typescript@5.9.3__typescript@5.9.3/node_modules/.prisma/client/query_engine-windows.dll.node.tmp\"*)"
+    ]
+  }
+}

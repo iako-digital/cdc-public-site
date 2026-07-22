@@ -1,0 +1,612 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  Student
+  Mentor
+  SuperAdmin
+  EnterpriseClient
+}
+
+enum UserStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum GigBudgetType {
+  fixed
+  hourly
+}
+
+enum GigStatus {
+  open
+  assigned
+  submitted
+  completed
+  cancelled
+}
+
+enum ApplicationStatus {
+  submitted
+  reviewed
+  accepted
+  rejected
+}
+
+enum EscrowStatus {
+  HELD_IN_ESCROW
+  RELEASED
+  REFUNDED
+  DISPUTED
+}
+
+enum WalletEntryType {
+  ESCROW_RELEASE_CREDIT
+  PAYOUT_DEBIT
+  ADJUSTMENT
+}
+
+enum EmploymentType {
+  full_time
+  part_time
+  contract
+  internship
+}
+
+enum VacancyStatus {
+  open
+  closed
+  filled
+}
+
+enum OrderStatus {
+  Pending
+  Approved
+  Processing
+  Completed
+  Cancelled
+}
+
+enum ReviewType {
+  CLIENT_TO_FREELANCER
+  FREELANCER_TO_CLIENT
+}
+
+enum DirectOfferStatus {
+  pending
+  accepted
+  declined
+  withdrawn
+}
+
+// Internal admin-team permission tier — deliberately separate from `Role`
+// (the marketplace role: Student/Mentor/SuperAdmin/EnterpriseClient). A user
+// can have a marketplace role AND, independently, a seat on the admin team.
+// SCREAMING_SNAKE_CASE on purpose, to keep it visually distinct from `Role`
+// at every call site and avoid the two ever being confused for each other.
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  MODERATOR
+}
+
+enum ListingModerationStatus {
+  approved
+  removed
+}
+
+enum BogPaymentPurpose {
+  COURSE
+  MENTORSHIP
+  GIG_ESCROW_FUNDING
+}
+
+// Mirrors BOG's own order_status.key values (see GET /payments/v1/receipt/:id)
+// down to PENDING/COMPLETED/FAILED/CANCELLED — collapsed to our 4 states
+// rather than mirroring their full state machine (created/processing/
+// refund_requested/refunded/etc), since refunds aren't implemented here.
+enum BogPaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ============================================================
+// USER
+// ============================================================
+
+model User {
+  id              String     @id @default(uuid())
+  email           String     @unique
+  password        String
+  name            String
+  role            Role       @default(Student)
+  status          UserStatus @default(PENDING_APPROVAL)
+  rejectionReason String?
+  earningsBalance Int        @default(0)
+  // Denormalized rollup of `reviewsReceived`, recomputed on every new review —
+  // avoids an AVG() aggregate query every time a rating needs to be displayed
+  // (profile pages, gig/vacancy cards, etc).
+  averageRating   Float?
+  reviewCount     Int        @default(0)
+  // Set only by a SuperAdmin (POST /api/admin/users/:id/verify-graduate) once
+  // they've confirmed the user actually completed a CDC course — there is no
+  // automated course-completion pipeline yet, so this is a manual gate.
+  isVerifiedGraduate Boolean @default(false)
+  // Soft-delete: set the moment the user confirms account deletion. The
+  // account is deactivated immediately (blocked from logging in or taking
+  // marketplace actions). 60 days later, the cleanup cron either hard-deletes
+  // the row (if nothing references it) or anonymizes it in place (see
+  // dataPurgedAt) when other users' financial/activity records depend on it.
+  deletionRequestedAt DateTime?
+  // Set when the 60-day cleanup cron anonymizes (rather than hard-deletes)
+  // this row, so the cron doesn't keep re-processing it on every run.
+  dataPurgedAt        DateTime?
+  // Self-service email verification (separate from `status`'s admin-approval
+  // gate — both must clear before protected actions, see requireApproved).
+  // Set immediately for Google sign-ups (Google already verified the email).
+  // Existing rows are backfilled to their createdAt at migration time so this
+  // new gate doesn't retroactively lock out accounts that predate it.
+  emailVerifiedAt                DateTime?
+  emailVerificationToken         String?   @unique
+  emailVerificationTokenExpires  DateTime?
+  // Set for accounts created (or later linked) via Google Sign-In. Such
+  // accounts get a random unusable password hash — there is no password-based
+  // login path for them (see routes/auth.ts).
+  googleId                       String?   @unique
+  // Internal admin-team tier (see AdminRole) — null means "not on the admin
+  // team." Independent of `role`; set only via the admin Team Management
+  // panel (SUPER_ADMIN-only) or the one-off seed utility.
+  adminRole       AdminRole?
+  // Admin-initiated ban (distinct from `deletionRequestedAt`, which is
+  // self-service account deletion). A banned user is blocked from logging in
+  // and from every requireApproved-gated action, same enforcement points as
+  // deletion, but reversible and admin-controlled.
+  isBanned        Boolean    @default(false)
+  bannedAt        DateTime?
+  banReason       String?
+  createdAt       DateTime   @default(now())
+
+  postedGigs             Gig[]                @relation("PostedGigs")
+  assignedGigs           Gig[]                @relation("AssignedGigs")
+  gigApplications        GigApplication[]
+  clientTransactions     GigTransaction[]     @relation("ClientTransactions")
+  freelancerTransactions GigTransaction[]     @relation("FreelancerTransactions")
+  walletEntries          WalletEntry[]
+  postedVacancies        Vacancy[]
+  vacancyApplications    VacancyApplication[]
+  blogPosts              BlogPost[]
+  reviewsGiven           Review[]             @relation("ReviewsGiven")
+  reviewsReceived        Review[]             @relation("ReviewsReceived")
+  sentDirectOffers       DirectOffer[]        @relation("SentDirectOffers")
+  receivedDirectOffers   DirectOffer[]        @relation("ReceivedDirectOffers")
+  sentMessages           Message[]            @relation("SentMessages")
+  receivedMessages       Message[]            @relation("ReceivedMessages")
+  paymentMethods         PaymentMethod[]
+  bogPayments            BogPayment[]
+  courseEnrollments      CourseEnrollment[]
+
+  @@map("users")
+}
+
+// ============================================================
+// GIG
+// ============================================================
+
+model Gig {
+  id                   String        @id @default(uuid())
+  title                String
+  description          String
+  postedById           String
+  postedBy             User          @relation("PostedGigs", fields: [postedById], references: [id], onDelete: Restrict)
+  budgetType           GigBudgetType
+  budgetAmount         Int
+  currency             String        @db.Char(3)
+  skillsRequired       String[]
+  deadline             DateTime?
+  status               GigStatus     @default(open)
+  assignedFreelancerId String?
+  assignedFreelancer   User?         @relation("AssignedGigs", fields: [assignedFreelancerId], references: [id], onDelete: SetNull)
+  // Denormalized count of `applications`, incremented alongside each new
+  // GigApplication — lets job cards show "N proposals" without a join/count
+  // query on every listing fetch.
+  applicationsCount    Int           @default(0)
+  // Set when the freelancer submits delivered work (status -> submitted).
+  // The 7-day auto-approve cron reads submittedAt to find overdue reviews.
+  submittedAt          DateTime?
+  deliveryComment      String?
+  deliveryFiles        String[]      @default([])
+  deliveryLinks        String[]      @default([])
+  // Post-hoc moderation (not a pre-publish queue — listings go live
+  // immediately on posting, same as before; a moderator can take one down
+  // after the fact). Defaults to approved so existing behavior is unchanged.
+  moderationStatus     ListingModerationStatus @default(approved)
+  moderatedAt          DateTime?
+  moderationReason     String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  applications GigApplication[]
+  transaction  GigTransaction?
+  reviews      Review[]
+  directOffers DirectOffer[]
+
+  @@index([status])
+  @@index([status, skillsRequired])
+  @@index([moderationStatus])
+  @@map("gigs")
+}
+
+// ============================================================
+// GIG APPLICATION
+// ============================================================
+
+model GigApplication {
+  id           String            @id @default(uuid())
+  gigId        String
+  gig          Gig               @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  applicantId  String
+  applicant    User              @relation(fields: [applicantId], references: [id], onDelete: Restrict)
+  proposalNote String
+  bidAmount    Int
+  deliveryDays Int               @default(7)
+  status       ApplicationStatus @default(submitted)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  transaction GigTransaction?
+
+  @@unique([gigId, applicantId])
+  @@index([status])
+  @@map("gig_applications")
+}
+
+// ============================================================
+// GIG TRANSACTION (Escrow ledger — capture record)
+// ============================================================
+
+model GigTransaction {
+  id               String         @id @default(uuid())
+  gigId            String         @unique
+  gig              Gig            @relation(fields: [gigId], references: [id], onDelete: Restrict)
+  gigApplicationId String         @unique
+  gigApplication   GigApplication @relation(fields: [gigApplicationId], references: [id], onDelete: Restrict)
+  clientId         String
+  client           User           @relation("ClientTransactions", fields: [clientId], references: [id], onDelete: Restrict)
+  freelancerId     String
+  freelancer       User           @relation("FreelancerTransactions", fields: [freelancerId], references: [id], onDelete: Restrict)
+  grossAmount      Int
+  commissionRate   Float
+  commissionAmount Int
+  netAmount        Int
+  currency         String         @db.Char(3)
+  status           EscrowStatus   @default(HELD_IN_ESCROW)
+  providerRef      String         @unique
+  capturedAt       DateTime
+  releasedAt       DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  walletEntries WalletEntry[]
+
+  @@index([status])
+  @@map("gig_transactions")
+}
+
+// ============================================================
+// WALLET ENTRY (Escrow ledger — append-only, immutable)
+// ============================================================
+
+model WalletEntry {
+  id                      String          @id @default(uuid())
+  userId                  String
+  user                    User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  type                    WalletEntryType
+  amount                  Int
+  relatedGigTransactionId String?
+  relatedGigTransaction   GigTransaction? @relation(fields: [relatedGigTransactionId], references: [id], onDelete: SetNull)
+  balanceAfter            Int
+  createdAt               DateTime        @default(now())
+
+  @@index([userId])
+  @@map("wallet_entries")
+}
+
+// ============================================================
+// VACANCY
+// ============================================================
+
+model Vacancy {
+  id                  String         @id @default(uuid())
+  title               String
+  description         String
+  postedById          String
+  postedBy            User           @relation(fields: [postedById], references: [id], onDelete: Restrict)
+  employmentType      EmploymentType
+  location            String
+  skillsRequired      String[]
+  salaryMin           Int?
+  salaryMax           Int?
+  currency            String?        @db.Char(3)
+  applicationDeadline DateTime?
+  status              VacancyStatus  @default(open)
+  moderationStatus     ListingModerationStatus @default(approved)
+  moderatedAt          DateTime?
+  moderationReason     String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  applications VacancyApplication[]
+
+  @@index([status])
+  @@index([moderationStatus])
+  @@map("vacancies")
+}
+
+// ============================================================
+// VACANCY APPLICATION
+// ============================================================
+
+model VacancyApplication {
+  id          String            @id @default(uuid())
+  vacancyId   String
+  vacancy     Vacancy           @relation(fields: [vacancyId], references: [id], onDelete: Cascade)
+  applicantId String
+  applicant   User              @relation(fields: [applicantId], references: [id], onDelete: Restrict)
+  coverNote   String
+  status      ApplicationStatus @default(submitted)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@unique([vacancyId, applicantId])
+  @@index([status])
+  @@map("vacancy_applications")
+}
+
+// ============================================================
+// COURSE
+// ============================================================
+
+model Course {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  category    String
+  lessons     Json
+  price       Int
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orders      Order[]            @relation("OrderCourses")
+  enrollments CourseEnrollment[]
+
+  @@map("courses")
+}
+
+// ============================================================
+// COURSE ENROLLMENT (individual purchase access — separate from `Order`,
+// which is the pre-existing B2B bulk-seat model; this is one student buying
+// access to one course via BOG checkout)
+// ============================================================
+
+model CourseEnrollment {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  courseId   String
+  course     Course   @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  grantedAt  DateTime @default(now())
+
+  @@unique([userId, courseId])
+  @@map("course_enrollments")
+}
+
+// ============================================================
+// ORDER
+// ============================================================
+
+model Order {
+  id           String      @id @default(uuid())
+  enterprise   String
+  contactEmail String
+  courses      Course[]    @relation("OrderCourses")
+  quantity     Int
+  totalPrice   Int
+  status       OrderStatus @default(Pending)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([status])
+  @@map("orders")
+}
+
+// ============================================================
+// BLOG POST
+// ============================================================
+
+model BlogPost {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  category    String
+  content     String
+  imageUrl    String?
+  authorId    String
+  author      User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  published   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([published])
+  @@map("blog_posts")
+}
+
+// ============================================================
+// REVIEW (two-way, Upwork-style — one per participant per completed gig)
+// ============================================================
+
+model Review {
+  id         String     @id @default(uuid())
+  gigId      String
+  gig        Gig        @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User       @relation("ReviewsGiven", fields: [reviewerId], references: [id], onDelete: Restrict)
+  revieweeId String
+  reviewee   User       @relation("ReviewsReceived", fields: [revieweeId], references: [id], onDelete: Restrict)
+  rating     Int
+  comment    String
+  type       ReviewType
+  createdAt  DateTime   @default(now())
+
+  // One review per (gig, reviewer) — a participant can only review a given
+  // gig once, which is also how "already reviewed" is enforced server-side.
+  @@unique([gigId, reviewerId])
+  @@index([revieweeId])
+  @@map("reviews")
+}
+
+// ============================================================
+// DIRECT OFFER (client-initiated outreach to a specific freelancer —
+// either attached to one of the client's own open gigs, or a standalone
+// quick custom offer with no gig behind it yet)
+// ============================================================
+
+model DirectOffer {
+  id           String            @id @default(uuid())
+  clientId     String
+  client       User              @relation("SentDirectOffers", fields: [clientId], references: [id], onDelete: Restrict)
+  freelancerId String
+  freelancer   User              @relation("ReceivedDirectOffers", fields: [freelancerId], references: [id], onDelete: Restrict)
+  gigId        String?
+  gig          Gig?              @relation(fields: [gigId], references: [id], onDelete: SetNull)
+  title        String
+  description  String
+  budgetAmount Int
+  currency     String            @db.Char(3)
+  message      String
+  status       DirectOfferStatus @default(pending)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([freelancerId])
+  @@index([clientId])
+  @@map("direct_offers")
+}
+
+// ============================================================
+// MESSAGE (direct 1:1 chat between two users — content is sanitized with
+// sanitizeChatMessage server-side BEFORE it ever reaches this table, so
+// what's stored is already safe to display as-is)
+// ============================================================
+
+model Message {
+  id          String   @id @default(uuid())
+  senderId    String
+  sender      User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Restrict)
+  recipientId String
+  recipient   User     @relation("ReceivedMessages", fields: [recipientId], references: [id], onDelete: Restrict)
+  content     String
+  wasFiltered Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([senderId, recipientId])
+  @@index([recipientId, senderId])
+  @@map("messages")
+}
+
+// ============================================================
+// PAYMENT METHOD (view/delete only — there is no payment-processor
+// integration in this app yet, so nothing can create one through the API;
+// existing rows would come from a future Stripe/etc. integration or manual
+// seeding, same as this endpoint's original frontend scaffold assumed)
+// ============================================================
+
+model PaymentMethod {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  processorToken String
+  brand          String
+  last4          String
+  expiryMonth    Int
+  expiryYear     Int
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+  @@map("payment_methods")
+}
+
+// ============================================================
+// BOG SETTINGS (Bank of Georgia payment gateway config — SUPER_ADMIN only)
+//
+// There is no real BOG merchant integration wired up anywhere in this app —
+// no payment gateway has ever called out to BOG. This model is a config
+// store the admin panel can read/write; secretKey/webhookSecret are never
+// echoed back in full once set (masked, same principle as never returning a
+// password hash). A single row is used as an app-wide singleton — the
+// service layer enforces that, not the schema.
+// ============================================================
+
+model BogSettings {
+  id             String   @id @default(uuid())
+  // OAuth2 client_credentials — matches BOG's real Online Payment API
+  // (POST https://oauth2.bog.ge/auth/realms/bog/protocol/openid-connect/token,
+  // Basic auth of clientId:secretKey). Renamed from merchantId/publicKey/
+  // webhookSecret (this session's earlier guess before the real API contract
+  // was confirmed) — BOG doesn't take a separate "merchant id" or "our public
+  // key," and callback authenticity is verified against BOG's own published
+  // RSA public key (hardcoded in bogPaymentService.ts), not a shared secret.
+  clientId       String?
+  secretKey      String?
+  isLiveMode     Boolean  @default(false)
+  updatedByEmail String?
+  updatedAt      DateTime @updatedAt
+
+  @@map("bog_settings")
+}
+
+// ============================================================
+// BOG PAYMENT (one row per BOG order, across all three checkout flows —
+// purpose + referenceId is a lightweight polymorphic pointer rather than
+// three near-identical tables, since the payment lifecycle itself — create
+// order, await callback, mark completed/failed — is identical regardless of
+// what's being paid for)
+// ============================================================
+
+model BogPayment {
+  id          String            @id @default(uuid())
+  bogOrderId  String            @unique
+  userId      String
+  user        User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  purpose     BogPaymentPurpose
+  // COURSE -> Course.id, MENTORSHIP -> free-text package label (no
+  // mentorship/booking model exists yet), GIG_ESCROW_FUNDING -> Gig.id
+  referenceId String
+  amount      Int               // minor units
+  currency    String            @db.Char(3)
+  status      BogPaymentStatus  @default(PENDING)
+  redirectUrl String?
+  // Last callback payload received from BOG, kept for audit/debugging —
+  // never trusted as the source of truth without signature verification.
+  rawCallback Json?
+  createdAt   DateTime          @default(now())
+  completedAt DateTime?
+
+  @@index([userId])
+  @@index([purpose, referenceId])
+  @@map("bog_payments")
+}

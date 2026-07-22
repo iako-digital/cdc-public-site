@@ -1,0 +1,21 @@
+{
+  "name": "cdc-platform",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "Backend",
+    "Frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace Backend run dev",
+    "dev:frontend": "npm --workspace Frontend run dev",
+    "build:backend": "npm --workspace Backend run build",
+    "build:frontend": "npm --workspace Frontend run build",
+    "zip": "zip -r ~/cdc-platform.zip ~/cdc-platform"
+  },
+  "dependencies": {
+    "i18next": "^26.3.6",
+    "next-i18next": "^16.0.8",
+    "react-i18next": "^17.0.10"
+  }
+}
