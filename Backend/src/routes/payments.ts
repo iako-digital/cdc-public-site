@@ -45,7 +45,7 @@ router.post(
 
     const bogPayment = await prisma.bogPayment.create({
       data: {
-        bogOrderId: `pending-${crypto_randomUUID()}`,
+        bogOrderId: `pending-${crypto.randomUUID()}`,
         userId: req.user!.id,
         purpose: 'COURSE',
         referenceId: course.id,
@@ -94,7 +94,7 @@ router.post(
 
     const bogPayment = await prisma.bogPayment.create({
       data: {
-        bogOrderId: `pending-${crypto_randomUUID()}`,
+        bogOrderId: `pending-${crypto.randomUUID()}`,
         userId: req.user!.id,
         purpose: 'MENTORSHIP',
         referenceId: mentor.id,
@@ -153,7 +153,7 @@ router.post(
 
     const bogPayment = await prisma.bogPayment.create({
       data: {
-        bogOrderId: `pending-${crypto_randomUUID()}`,
+        bogOrderId: `pending-${crypto.randomUUID()}`,
         userId: req.user!.id,
         purpose: 'GIG_ESCROW_FUNDING',
         referenceId: gig.id,
@@ -307,9 +307,5 @@ router.get('/bog/status/:paymentId', authenticate, async (req: Request, res: Res
     },
   });
 });
-
-function crypto_randomUUID(): string {
-  return require('crypto').randomUUID();
-}
 
 export default router;

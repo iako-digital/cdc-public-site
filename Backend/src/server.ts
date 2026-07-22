@@ -20,14 +20,26 @@ import directOfferRoutes from './routes/directOffers';
 import messageRoutes from './routes/messages';
 import cronRoutes from './routes/cron';
 import billingRoutes from './routes/billing';
+import paymentRoutes from './routes/payments';
 import { errorHandler } from './middleware/errorHandler';
 import { PORT } from './utils/env';
 import { autoApproveOverdueGigs } from './services/gigApprovalService';
 import { cleanupExpiredDeletedAccounts } from './services/accountCleanupService';
 
+declare global {
+  namespace Express {
+    interface Request {
+      // Raw request body bytes, needed to verify the BOG `Callback-Signature`
+      // header (see routes/payments.ts) — re-serializing req.body with
+      // JSON.stringify can reorder/reformat fields and break the signature.
+      rawBody?: Buffer;
+    }
+  }
+}
+
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ verify: (req, _res, buf) => { (req as express.Request).rawBody = buf; } }));
 app.use('/uploads', express.static(path.join(__dirname, '..', 'public', 'uploads')));
 
 app.use('/api/auth', authRoutes);
@@ -45,6 +57,7 @@ app.use('/api/direct-offers', directOfferRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/cron', cronRoutes);
 app.use('/api/billing', billingRoutes);
+app.use('/api/payments', paymentRoutes);
 
 const swaggerDocument = {
   openapi: '3.0.3',
